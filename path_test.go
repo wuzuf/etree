@@ -203,3 +203,27 @@ func TestAbsolutePath(t *testing.T) {
 		}
 	}
 }
+
+func TestPath2(t *testing.T) {
+	rr := make([]rune, 0)
+	s := "\tabc"
+	for _, r := range s {
+		t.Logf("r=%d\n", r)
+		rr = append(rr, r)
+	}
+	t.Logf("%s\n", s)
+	t.Logf("2: %s\n", string(rr))
+
+	c := compiler2{}
+	err := c.tokenizePath(`/a[b="a'btest"]`)
+	for i, tok := range c.tokens {
+		if tok.value != "" {
+			t.Logf("%2d: tok=%d v='%s'\n", i, tok.id, tok.value)
+		} else {
+			t.Logf("%2d: tok=%d\n", i, tok.id)
+		}
+	}
+	if err != nil {
+		t.Errorf("ERR: %v\n", err)
+	}
+}
