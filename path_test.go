@@ -215,7 +215,7 @@ func TestPath2(t *testing.T) {
 	t.Logf("2: %s\n", string(rr))
 
 	c := compiler2{}
-	err := c.tokenizePath(`/a[b="a'btest"]`)
+	err := c.tokenizePath(`/a[(b="a'btest"|@c='foo')]`)
 	for i, tok := range c.tokens {
 		if tok.value != "" {
 			t.Logf("%2d: tok=%d v='%s'\n", i, tok.id, tok.value)

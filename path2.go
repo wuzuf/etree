@@ -112,10 +112,10 @@ Tokens:
   [0-9][0-9]* 			number
 
 Grammar:
-  <path> ::= <segment>? (<sep> <segment>)* <sep>?
+  <path> ::= <segmentGroup>? (<sep> <segmentGroup>)* <sep>?
   <sep> ::= '/' | '//'
-  <segment> ::= <selectorGroup> (<filterGroup>)*
-  <selectorGroup> ::= <selector> ('|' <selector>)*
+  <segmentGroup> ::= '(' <segment> ')' | <segment>
+  <segment> ::= <selector> (<filterGroup>)*
   <selector> ::= '.' | '..' | '*' | identifier
   <filterGroup> ::= '[' <filterExpr> ('|' <filterExpr>)* ']'
   <filterExpr> ::= <filterExist> | <filterIndex> | <filterCompare>
