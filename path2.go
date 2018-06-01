@@ -105,28 +105,53 @@ Tokens:
   .						curr
   ..					parent
   *						wildcard
-  '.*'					string
-  ".*"					string
+  '[^']*'				string
+  "[^"]*'				string
   text()				function
   [a-zA-Z][a-z_A-Z0-9]*	identifier
-  [0-9][0-9]* 			number
+  [-+]?[0-9][0-9]* 		number
+
+Example:
+  //(book|pamphlet[@size='small'])/*[(@author='a'|@author='b')]
 
 Grammar:
-  <path> ::= <segmentGroup>? (<sep> <segmentGroup>)* <sep>?
-  <sep> ::= '/' | '//'
-  <segmentGroup> ::= '(' <segment> ')' | <segment>
-  <segment> ::= <selector> (<filterGroup>)*
-  <selector> ::= '.' | '..' | '*' | identifier
-  <filterGroup> ::= '[' <filterExpr> ('|' <filterExpr>)* ']'
-  <filterExpr> ::= <filterExist> | <filterIndex> | <filterCompare>
-  <filterExist> ::= <filterKey>
-  <filterIndex> ::= number
-  <filterCompare> ::= <filterKey> = <filterValue>
-  <filterKey> ::= <keyIdent> | <keyFunc> | <keyAttrib>
-  <filterValue> ::= string
-  <keyIdent> ::= identifier
-  <keyFunc> ::= identifier '(' ')'
-  <keyAttrib> ::= '@' identifier
+  <path>          ::= <sep>? (<segmentUnion> <sep>)* <segmentUnion>?
+  <sep>           ::= '/' | '//'
+  <segmentUnion>  ::= <segmentExpr> ('|' <segmentExpr>)
+  <segmentExpr>   ::= <selector> <filterWrapper>* | '(' <segmentExpr> ')'
+  <selector>      ::= '.' | '..' | '*' | identifier
+  <filterWrapper> ::= '[' <filterUnion> ']'
+  <filterUnion>   ::= <filterExpr> ('|' <filterExpr>)*
+  <filterExpr>    ::= <filterIndex> | <filterCompare> | <filterExist> | '(' <filterExpr> ')'
+  <filterIndex>   ::= number
+  <filterCompare> ::= <filterKey> '=' <filterValue>
+  <filterExist>   ::= <filterKey>
+  <filterKey>     ::= <keyIdent> | <keyFunc> | <keyAttrib>
+  <filterValue>   ::= string
+  <keyFunc>       ::= identifier '(' ')'
+  <keyIdent>      ::= identifier
+  <keyAttrib>     ::= '@' identifier
+
+tokenizer
+  consume
+  peek
+  consumeAndRemember
+  flush
+  restore
+
+path
+  []segmentUnion
+segmentUnion
+  []segmentExpr
+segmentExpr
+  selector
+  []filterUnion
+selector
+  curr | parent | wildcard | tag
+filterUnion
+  []filterExpr
+filterExpr
+  filterIndex | filterAttribExist | filterAttribValue | filterTagExit | filterTagValue
 */
 
 // A compiler generates a compiled path from a path string.
@@ -179,7 +204,7 @@ const (
 	xIdentStart = 1 << 6
 	xIdentChar  = 1 << 7
 	x0          = 0
-	x1          = xIdentStart
+	x1          = xIdentChar
 	x2          = xIdentChar | xIdentStart
 )
 
@@ -436,6 +461,7 @@ func identifierStart(r rune) bool {
 }
 
 func identifier(r rune) bool {
+	// "-" | "." | [0-9] | #xB7 | [#x0300-#x036F] | [#x203F-#x2040]
 	switch {
 	case r < 128:
 		return (tbl0[r] & xIdentChar) != 0
