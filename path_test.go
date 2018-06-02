@@ -205,31 +205,46 @@ func TestAbsolutePath(t *testing.T) {
 }
 
 func TestPath2(t *testing.T) {
-	rr := make([]rune, 0)
-	s := "\tabc"
-	for _, r := range s {
-		t.Logf("r=%d\n", r)
-		rr = append(rr, r)
-	}
-	t.Logf("%s\n", s)
-	t.Logf("2: %s\n", string(rr))
+	pathStr := `./ ((apple[ ((banana) | cat="dog") ] [-1])) | b /b`
 
-	c := compiler2{}
-	err := c.tokenizePath(`a[((b)|c)]`)
-	for i, tok := range c.tokens {
+	var c compiler2
+	toks, err := c.tokenizePath(pathStr)
+	if err != nil {
+		t.Errorf("ERR: %v\n", err)
+	}
+
+	for i, tok := range toks {
 		if tok.value != "" {
-			t.Logf("%2d: tok=%d v='%s'\n", i, tok.id, tok.value)
+			t.Logf("%2d: tok=%s v='%s'\n", i, tokName[tok.id], tok.value)
 		} else {
-			t.Logf("%2d: tok=%d\n", i, tok.id)
+			t.Logf("%2d: tok=%s\n", i, tokName[tok.id])
 		}
 	}
+
+	p, err := CompilePath2(pathStr)
 	if err != nil {
 		t.Errorf("ERR: %v\n", err)
 	}
 
-	var p Path2
-	err = c.parsePath(&p, c.tokens)
-	if err != nil {
-		t.Errorf("ERR: %v\n", err)
-	}
+	_ = p
+}
+
+var tokName = []string{
+	"nil",
+	"'/'",
+	"'//'",
+	"'['",
+	"']'",
+	"'('",
+	"')'",
+	"'|'",
+	"'='",
+	"'@'",
+	"'.'",
+	"'..'",
+	"'*'",
+	"string",
+	"ident",
+	"num",
+	"EOL",
 }

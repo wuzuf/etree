@@ -7,9 +7,16 @@ package etree
 import (
 	"errors"
 	"reflect"
+	"strconv"
 	"unicode/utf8"
 	"unsafe"
 )
+
+var errPathSyntax = errors.New("etree: path syntax error")
+
+// TODO:
+//  Parse escape codes in strings
+//  Write selector and filter apply functions
 
 /*
 A Path2 is an object that represents an optimized version of an XPath-like
@@ -63,19 +70,25 @@ elements whose title element has an attribute 'language' equal to 'french':
 
 */
 type Path2 struct {
-	segUnions []segmentUnion2 // take union of segment results
+	segments []segment2 // take union of segment results
 }
 
 // CompilePath2 creates an optimized version of an XPath-like string that
 // can be used to query elements in an element tree.
-func CompilePath2(path string) (Path2, error) {
-	return Path2{}, nil
-	// var comp compiler2
-	// segments := comp.parsePath(path)
-	// if comp.err != ErrPath("") {
-	// 	return Path2{nil}, comp.err
-	// }
-	// return Path2{segments}, nil
+func CompilePath2(path string) (p Path2, err error) {
+	var c compiler2
+
+	toks, err := c.tokenizePath(path)
+	if err != nil {
+		return p, err
+	}
+
+	err = c.parsePath(&p, toks)
+	if err != nil {
+		return Path2{}, err
+	}
+
+	return p, nil
 }
 
 // MustCompilePath2 creates an optimized version of an XPath-like string that
@@ -94,326 +107,396 @@ var errPath = errors.New("invalid path")
 
 /*
 Tokens:
-  /						sep
-  //					sep_recurse
-  [						lbracket
-  ]						rbracket
-  (						lparen
-  )						rparen
-  |						or
-  =						equal
-  @						attrib
-  .						curr
-  ..					parent
-  *						wildcard
-  '[^']*'				string
-  "[^"]*'				string
-  text()				function
-  [a-zA-Z][a-z_A-Z0-9]*	identifier
-  [-+]?[0-9][0-9]* 		number
-
-Example:
-  //(book|pamphlet[@size='small'])/*[(@author='a'|@author='b')]
+  /                     sep
+  //                    sep_recurse
+  [                     lbracket
+  ]                     rbracket
+  (                     lparen
+  )                     rparen
+  |                     union
+  =                     equal
+  @                     attrib
+  .                     self
+  ..                    parent
+  *                     wildcard
+  '[^']*'               string
+  "[^"]*'               string
+  [a-zA-Z][a-z_A-Z0-9]* identifier
+  -?[0-9][0-9]*         number
 
 Grammar:
-  <path>          ::= <sep>? (<segmentUnion> <sep>)* <segmentUnion>?
+  <path>          ::= <sep>? (<segment> <sep>)* <segment>?
   <sep>           ::= '/' | '//'
-  <segmentUnion>  ::= <segment> ('|' <segment>)
-  <segment>       ::= <selector> <filterWrapper>* | '(' <segment> ')'
+  <segment>       ::= <segmentExpr> ('|' <segmentExpr>)
+  <segmentExpr>   ::= <selector> <filterWrapper>* | '(' <segment> ')'
   <selector>      ::= '.' | '..' | '*' | identifier
-  <filterWrapper> ::= '[' <filterUnion> ']'
-  <filterUnion>   ::= <filter> ('|' <filter>)* | '(' <filterUnion> ')'
-  <filter>        ::= <filterIndex> | <filterCompare> | <filterExist> | '(' <filter> ')'
+  <filterWrapper> ::= '[' <filter> ']'
+  <filter>        ::= <filterExpr> ('|' <filterExpr>)*
+  <filterExpr>    ::= <filterIndex> | <filterAttrib> | <filterChild> | <filterFunc> | '(' <filter> ')'
   <filterIndex>   ::= number
-  <filterCompare> ::= <filterKey> '=' <filterValue>
-  <filterExist>   ::= <filterKey>
-  <filterKey>     ::= <keyIdent> | <keyFunc> | <keyAttrib>
-  <filterValue>   ::= string
-  <keyFunc>       ::= identifier '(' ')'
-  <keyIdent>      ::= identifier
-  <keyAttrib>     ::= '@' identifier
+  <filterAttrib>  ::= '@' ident | '@' ident '=' string
+  <filterChild>   ::= ident | ident '=' string
+  <filterFunc>    ::= ident '(' ')' | ident '(' ')' '=' string
 */
 
-type segmentUnion2 struct {
-	segments []segment2
+type segment2 struct {
+	exprs []segmentExpr2 // apply union of all segment expressions
 }
 
-type segment2 struct {
-	sel          selector2
-	filterUnions []filterUnion2 // apply filters in sequence
+type segmentExpr2 struct {
+	sel     selector2
+	filters []filter2 // apply filters in sequence
+}
+
+type filter2 struct {
+	exprs []filterExpr2 // union of all filter expressions
 }
 
 type selector2 interface {
 	//	apply(e *Element, p *pather)
 }
 
-type filterUnion2 struct {
-	filters []filter2 // take union of all filter results
+type filterExpr2 interface {
+	//	apply(p *pather)
 }
 
-type filter2 interface {
-	//	apply(p *pather)
+var rootSegment = segment2{
+	exprs: []segmentExpr2{
+		segmentExpr2{
+			sel: selectRoot2{},
+		},
+	},
+}
+
+var descendantsSegment = segment2{
+	exprs: []segmentExpr2{
+		segmentExpr2{
+			sel: selectDescendants2{},
+		},
+	},
 }
 
 // A compiler generates a compiled path from a path string.
 type compiler2 struct {
-	err    error
-	tokens tokenList
 }
 
-func (c *compiler2) parsePath(p *Path2, tokens tokenList) (err error) {
-	// Check for an absolute path (leading with '/' or '//').
-	tok := tokens.peek()
-	switch tok.id {
+func (c *compiler2) parsePath(p *Path2, toks tokens) (err error) {
+	// <path> ::= <sep>? (<segment> <sep>)* <segment>?
+
+	// Check for an absolute path.
+	switch toks.peekID() {
 	case tokSep:
-		// insert root selector
-		tokens = tokens.consume(1)
+		p.segments = append(p.segments, rootSegment)
+		toks = toks.consume(1)
 	case tokSepRecurse:
-		// insert root selector
-		// insert descendants selector
-		tokens = tokens.consume(1)
+		p.segments = append(p.segments, rootSegment)
+		p.segments = append(p.segments, descendantsSegment)
+		toks = toks.consume(1)
 	case tokEOL:
-		return errors.New("syntax error")
+		return errPathSyntax
 	}
 
+	// Process remaining segments.
 loop:
-	for len(tokens) > 0 {
-		var u segmentUnion2
-		tokens, err = c.parseSegmentUnion2(&u, tokens)
+	for len(toks) > 0 {
+		var s segment2
+		toks, err = c.parseSegment2(&s, toks)
 		if err != nil {
 			return err
 		}
 
-		p.segUnions = append(p.segUnions, u)
+		p.segments = append(p.segments, s)
 
-		tok, tokens = tokens.next()
+		var tok token
+		tok, toks = toks.next()
 		switch tok.id {
 		case tokSep:
 			// do nothing
 		case tokSepRecurse:
-			// insert descendants selector
+			p.segments = append(p.segments, descendantsSegment)
 		case tokEOL:
 			break loop
 		default:
-			return errors.New("syntax error")
+			return errPathSyntax
 		}
 	}
 
 	return nil
 }
 
-func (c *compiler2) parseSegmentUnion2(u *segmentUnion2, tokens tokenList) (remain tokenList, err error) {
-	// <segmentUnion> ::= <segment> ('|' <segment>)
+func (c *compiler2) parseSegment2(s *segment2, toks tokens) (remain tokens, err error) {
+	// <segment> ::= <segmentExpr> ('|' <segmentExpr>)
 
 	// Parse one or more segments.
 	for {
-		var s segment2
-		tokens, err = c.parseSegment2(&s, tokens)
+		toks, err = c.parseSegmentExpr2(s, toks)
 		if err != nil {
 			return nil, err
 		}
 
-		u.segments = append(u.segments, s)
-
-		if tokens.peek().id != tokOr {
+		if toks.peekID() != tokUnion {
 			break
 		}
-		tokens = tokens.consume(1)
+		toks = toks.consume(1)
 	}
 
-	return tokens, nil
+	return toks, nil
 }
 
-func (c *compiler2) parseSegment2(s *segment2, tokens tokenList) (remain tokenList, err error) {
-	// <segment> ::= <selector> <filterWrapper>* | '(' <segment> ')'
+func (c *compiler2) parseSegmentExpr2(s *segment2, toks tokens) (remain tokens, err error) {
+	// <segmentExpr> ::= <selector> <filterWrapper>* | '(' <segment> ')'
 
 	// Check for parentheses.
-	tok := tokens.peek()
-	if tok.id == tokLParen {
-		tokens, err = c.parseSegment2(s, tokens.consume(1))
+	if toks.peekID() == tokLParen {
+		var ss segment2
+		toks, err = c.parseSegment2(&ss, toks.consume(1))
 		if err != nil {
 			return nil, err
 		}
-		tok, tokens = tokens.next()
+
+		s.exprs = append(s.exprs, ss.exprs...)
+
+		var tok token
+		tok, toks = toks.next()
 		if tok.id != tokRParen {
-			return nil, errors.New("syntax error")
+			return nil, errPathSyntax
 		}
-		return tokens, nil
+		return toks, nil
 	}
 
 	// Parse the selector.
-	tokens, err = c.parseSelector2(&s.sel, tokens)
+	var e segmentExpr2
+	toks, err = c.parseSelector2(&e.sel, toks)
 	if err != nil {
 		return nil, err
 	}
 
-	// Parse zero or more wrapped filter expressions.
+	// Parse zero or more bracket-wrapped filter expressions.
 	for {
-		tok = tokens.peek()
-		if tok.id != tokLBracket {
+		if toks.peekID() != tokLBracket {
 			break
 		}
 
-		var f filterUnion2
-		tokens, err = c.parseFilterUnion2(&f, tokens.consume(1))
+		var f filter2
+		toks, err = c.parseFilter2(&f, toks.consume(1))
 		if err != nil {
-			return nil, errors.New("syntax error")
+			return nil, errPathSyntax
 		}
 
-		tok, tokens = tokens.next()
+		var tok token
+		tok, toks = toks.next()
 		if tok.id != tokRBracket {
-			return nil, errors.New("syntax error")
+			return nil, errPathSyntax
 		}
 
-		s.filterUnions = append(s.filterUnions, f)
+		e.filters = append(e.filters, f)
 	}
 
-	return tokens, nil
+	s.exprs = append(s.exprs, e)
+	return toks, nil
 }
 
-func (c *compiler2) parseSelector2(s *selector2, tokens tokenList) (remain tokenList, err error) {
-	// selector> ::= '.' | '..' | '*' | identifier
+func (c *compiler2) parseSelector2(s *selector2, toks tokens) (remain tokens, err error) {
+	// <selector> ::= '.' | '..' | '*' | identifier
 
 	var tok token
-	tok, tokens = tokens.next()
+	tok, toks = toks.next()
 	switch tok.id {
-	case tokCurrent:
-		// insert a current selector
+	case tokSelf:
+		*s = selectSelf2{}
 	case tokParent:
-		// insert a parent selector
+		*s = selectParent2{}
 	case tokChildren:
-		// insert a children selector
+		*s = selectChildren2{}
 	case tokIdentifier:
-		// insert a tag selector
+		*s = selectChildrenByTag2{tok.value}
 	default:
-		return nil, errors.New("syntax error")
+		return nil, errPathSyntax
 	}
 
-	return tokens, nil
+	return toks, nil
 }
 
-func (c *compiler2) parseFilterUnion2(fu *filterUnion2, tokens tokenList) (remain tokenList, err error) {
-	// <filterUnion> ::= <filter> ('|' <filter>)* | '(' <filterUnion> ')'
-
-	tok := tokens.peek()
-	if tok.id == tokLParen {
-		tokens, err = c.parseFilterUnion2(fu, tokens.consume(1))
-		if err != nil {
-			return nil, err
-		}
-		tok, tokens = tokens.next()
-		if tok.id != tokRParen {
-			return nil, errors.New("syntax error")
-		}
-		return tokens, nil
-	}
+func (c *compiler2) parseFilter2(fu *filter2, toks tokens) (remain tokens, err error) {
+	// <filter> ::= <filterExpr> ('|' <filterExpr>)*
 
 	// Parse one or more filter expressions.
 	for {
-		var f filter2
-		tokens, err = c.parseFilter2(&f, tokens)
+		toks, err = c.parseFilterExpr2(fu, toks)
 		if err != nil {
 			return nil, err
 		}
 
-		fu.filters = append(fu.filters, f)
-
-		tok := tokens.peek()
-		if tok.id != tokOr {
+		if toks.peekID() != tokUnion {
 			break
 		}
-		tokens = tokens.consume(1)
+		toks = toks.consume(1)
 	}
 
-	return tokens, nil
+	return toks, nil
 }
 
-func (c *compiler2) parseFilter2(f *filter2, tokens tokenList) (remain tokenList, err error) {
-	// <filter> ::= <filterIndex> | <filterCompare> | <filterExist> | '(' <filter> ')'
+func (c *compiler2) parseFilterExpr2(f *filter2, toks tokens) (remain tokens, err error) {
+	// <filterExpr> ::= number
+	//                | '@' ident | '@' ident '=' string
+	//                | ident | ident '=' string
+	//                | ident '(' ')' | ident '(' ')' '=' string
+	//                | '(' <filter> ')'
 
 	var tok token
-	tok, tokens = tokens.next()
+	tok, toks = toks.next()
 
-	// Check for parentheses.
 	switch tok.id {
 	case tokLParen:
-		tokens, err = c.parseFilter2(f, tokens)
+		// '(' <filter> ')'
+		var ff filter2
+		toks, err = c.parseFilter2(&ff, toks)
 		if err != nil {
 			return nil, err
 		}
-		tok, tokens = tokens.next()
+		tok, toks = toks.next()
 		if tok.id != tokRParen {
-			return nil, errors.New("syntax error")
+			return nil, errPathSyntax
 		}
+		f.exprs = append(f.exprs, ff.exprs...)
 
 	case tokNumber:
-		// insert an index filter
-		_ = tok.value
+		// number
+		index, _ := strconv.Atoi(string(tok.value))
+		if index > 0 {
+			index--
+		}
+		f.exprs = append(f.exprs, filterIndex2{index})
 
 	case tokAt:
-		tok, tokens = tokens.next()
+		tok, toks = toks.next()
 		if tok.id != tokIdentifier {
-			return nil, errors.New("syntax error")
+			return nil, errPathSyntax
 		}
 		name := tok.value
 
-		if tokens.peek().id == tokEqual {
-			tok, tokens = tokens.consume(1).next()
+		if toks.peekID() == tokEqual {
+			// '@' ident '=' string
+			tok, toks = toks.consume(1).next()
 			if tok.id != tokString {
-				return nil, errors.New("syntax error")
+				return nil, errPathSyntax
 			}
-			value := tok.value
-			// insert an attribute-value filter
-			_, _ = name, value
+			f.exprs = append(f.exprs, filterAttribByValue2{name, tok.value})
 		} else {
-			// insert an attribute-exist filter
-			_ = name
+			// '@' ident
+			f.exprs = append(f.exprs, filterAttrib2{name})
 		}
 
 	case tokIdentifier:
 		name := tok.value
 
-		tok = tokens.peek()
-		switch tok.id {
+		switch toks.peekID() {
 		case tokEqual:
-			tok, tokens = tokens.consume(1).next()
+			// ident '=' string
+			tok, toks = toks.consume(1).next()
 			if tok.id != tokString {
-				return nil, errors.New("syntax error")
+				return nil, errPathSyntax
 			}
-			value := tok.value
-			// insert a tag-value filter
-			_, _ = name, value
+			f.exprs = append(f.exprs, filterTagByValue2{name, tok.value})
 
 		case tokLParen:
-			tok, tokens = tokens.consume(1).next()
-			if tok.id != tokRParen {
-				return nil, errors.New("syntax error")
+			tok, toks = toks.consume(1).next()
+			if tok.id != tokRParen || name != "text" {
+				return nil, errPathSyntax
 			}
-			tok, tokens = tokens.next()
-			if tok.id != tokEqual {
-				return nil, errors.New("syntax error")
+			tok, toks = toks.next()
+			if tok.id == tokEqual {
+				// ident '(' ')' '=' string
+				tok, toks = toks.next()
+				if tok.id != tokString {
+					return nil, errPathSyntax
+				}
+				f.exprs = append(f.exprs, filterTextByValue2{tok.value})
+			} else {
+				// ident '(' ')'
+				f.exprs = append(f.exprs, filterText2{})
 			}
-			tok, tokens = tokens.next()
-			if tok.id != tokString {
-				return nil, errors.New("syntax error")
-			}
-			if name != "text" {
-				return nil, errors.New("syntax error")
-			}
-			value := tok.value
-			// insert a text filter
-			_ = value
 
 		default:
-			// insert a tag-exist filter
-			_ = name
+			// ident
+			f.exprs = append(f.exprs, filterTag2{name})
 		}
 
 	default:
-		return nil, errors.New("syntax error")
+		return nil, errPathSyntax
 	}
 
-	return tokens, nil
+	return toks, nil
+}
+
+// selectRoot selects the element's root node.
+type selectRoot2 struct {
+}
+
+// selectSelf selects the current element into the candidate list.
+type selectSelf2 struct {
+}
+
+// selectParent selects the element's parent into the candidate list.
+type selectParent2 struct {
+}
+
+// selectChildren selects the element's child elements into the candidate
+// list.
+type selectChildren2 struct {
+}
+
+// selectChildrenByTag selects into the candidate list all child elements of
+// the element having the specified tag.
+type selectChildrenByTag2 struct {
+	tag tstring
+}
+
+// selectDescendants selects all descendant child elements of the element into
+// the candidate list.
+type selectDescendants2 struct {
+}
+
+// filterIndex filters the candidate list, keeping only the candidate at the
+// specified index.
+type filterIndex2 struct {
+	index int
+}
+
+// filterAttrib filters the candidate list for elements having the specified
+// attribute.
+type filterAttrib2 struct {
+	attr tstring
+}
+
+// filterAttribByValue filters the candidate list for elements having the
+// specified attribute with the specified value.
+type filterAttribByValue2 struct {
+	attr  tstring
+	value tstring
+}
+
+// filterTag filters the candidate list for elements having a child element
+// with the specified tag.
+type filterTag2 struct {
+	tag tstring
+}
+
+// filterTagByValue filters the candidate list for elements having a child
+// element with the specified tag and text.
+type filterTagByValue2 struct {
+	tag   tstring
+	value tstring
+}
+
+// filterText filters the candidate list for elements having text.
+type filterText2 struct {
+}
+
+// filterTextByValue filters the candidate list for elements having
+// text equal to the specified value.
+type filterTextByValue2 struct {
+	value tstring
 }
 
 type tokenID uint8
@@ -426,13 +509,12 @@ const (
 	tokRBracket
 	tokLParen
 	tokRParen
-	tokOr
+	tokUnion
 	tokEqual
 	tokAt
-	tokCurrent
+	tokSelf
 	tokParent
 	tokChildren
-	tokText
 	tokString
 	tokIdentifier
 	tokNumber
@@ -449,7 +531,7 @@ const (
 	lWld       // wildcard
 	lSep       // separator
 	lNum       // numeric
-	lOra       // or
+	lUni       // union
 	lSub       // minus
 	lDot       // dot
 	lQuo       // quote
@@ -470,8 +552,8 @@ type token struct {
 	value tstring
 }
 
-// A table mapping the first character of a lexeme to a token or parser.
-var tbl0 = [128]uint8{
+// A table mapping the first character of a lexeme to token lookup data.
+var lexHint0 = [128]uint8{
 	x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, // 0..7
 	x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, // 8..15
 	x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, // 16..23
@@ -487,33 +569,54 @@ var tbl0 = [128]uint8{
 	x0 | lNil, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, // 96..103
 	x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, // 104..111
 	x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, // 112..119
-	x2 | lIde, x2 | lIde, x2 | lIde, x0 | lNil, x0 | lOra, x0 | lNil, x0 | lNil, x0 | lNil, // 120..127
+	x2 | lIde, x2 | lIde, x2 | lIde, x0 | lNil, x0 | lUni, x0 | lNil, x0 | lNil, x0 | lNil, // 120..127
 }
 
-type lexeme struct {
-	tok   tokenID
-	parse func(c *compiler2, s tstring) (t token, remain tstring, err error)
+type lexemeData struct {
+	tokID    tokenID
+	tokenize func(c *compiler2, s tstring) (t token, remain tstring, err error)
 }
 
-var ll = []lexeme{
-	/*lNil*/ {tok: tokNil},
-	/*lIde*/ {parse: (*compiler2).parseIdentifier},
-	/*lLBr*/ {tok: tokLBracket},
-	/*lRBr*/ {tok: tokRBracket},
-	/*lLpa*/ {tok: tokLParen},
-	/*lRpa*/ {tok: tokRParen},
-	/*lWld*/ {tok: tokChildren},
-	/*lSep*/ {parse: (*compiler2).parseSlash},
-	/*lNum*/ {parse: (*compiler2).parseNumber},
-	/*lOra*/ {tok: tokOr},
-	/*lSub*/ {parse: (*compiler2).parseMinus},
-	/*lDot*/ {parse: (*compiler2).parseDot},
-	/*lQuo*/ {parse: (*compiler2).parseQuote},
-	/*lAtt*/ {tok: tokAt},
-	/*lEqu*/ {tok: tokEqual},
+var lexToToken = []lexemeData{
+	/*lNil*/ {tokID: tokNil},
+	/*lIde*/ {tokenize: (*compiler2).tokenizeIdentifier},
+	/*lLBr*/ {tokID: tokLBracket},
+	/*lRBr*/ {tokID: tokRBracket},
+	/*lLpa*/ {tokID: tokLParen},
+	/*lRpa*/ {tokID: tokRParen},
+	/*lWld*/ {tokID: tokChildren},
+	/*lSep*/ {tokenize: (*compiler2).tokenizeSlash},
+	/*lNum*/ {tokenize: (*compiler2).tokenizeNumber},
+	/*lOra*/ {tokID: tokUnion},
+	/*lSub*/ {tokenize: (*compiler2).tokenizeMinus},
+	/*lDot*/ {tokenize: (*compiler2).tokenizeDot},
+	/*lQuo*/ {tokenize: (*compiler2).tokenizeQuote},
+	/*lAtt*/ {tokID: tokAt},
+	/*lEqu*/ {tokID: tokEqual},
 }
 
-func (c *compiler2) parseToken(s tstring) (t token, remain tstring, err error) {
+func (c *compiler2) tokenizePath(path string) (toks tokens, err error) {
+	s := tstring(path).consumeWhitespace()
+	toks = make(tokens, 0)
+
+	for len(s) > 0 {
+		tok, remain, err := c.tokenizeLexeme(s)
+		if err != nil {
+			return nil, err
+		}
+		if tok.id == tokNil {
+			return nil, errPath
+		}
+
+		toks = append(toks, tok)
+
+		s = remain.consumeWhitespace()
+	}
+
+	return toks, nil
+}
+
+func (c *compiler2) tokenizeLexeme(s tstring) (t token, remain tstring, err error) {
 	if len(s) == 0 {
 		return token{}, s, nil
 	}
@@ -521,45 +624,45 @@ func (c *compiler2) parseToken(s tstring) (t token, remain tstring, err error) {
 	r, sz := s.nextRune()
 
 	// Use the first character of the string to look up lexeme data.
-	var lex lexeme
+	var ldata lexemeData
 	switch {
 	case r < 128:
-		lex = ll[tbl0[r]&0x1f]
+		ldata = lexToToken[lexHint0[r]&0x3f]
 	case identifierStart(r):
-		lex = ll[lIde]
+		ldata = lexToToken[lIde]
 	default:
 		return token{}, s, errPath
 	}
 
 	// If the lexeme consists of only one character, we're done.
-	if lex.parse == nil {
-		return token{lex.tok, ""}, s.consume(sz), nil
+	if ldata.tokenize == nil {
+		return token{ldata.tokID, ""}, s.consume(sz), nil
 	}
 
 	// Parse the rest of the lexeme.
-	return lex.parse(c, s)
+	return ldata.tokenize(c, s)
 }
 
-func (c *compiler2) parseIdentifier(s tstring) (t token, remain tstring, err error) {
+func (c *compiler2) tokenizeIdentifier(s tstring) (t token, remain tstring, err error) {
 	var ident tstring
 	ident, remain = s.consumeWhile(identifier)
 	return token{tokIdentifier, ident}, remain, nil
 }
 
-func (c *compiler2) parseSlash(s tstring) (t token, remain tstring, err error) {
+func (c *compiler2) tokenizeSlash(s tstring) (t token, remain tstring, err error) {
 	if len(s) > 1 && s[1] == '/' {
 		return token{tokSepRecurse, ""}, s.consume(2), nil
 	}
 	return token{tokSep, ""}, s.consume(1), nil
 }
 
-func (c *compiler2) parseNumber(s tstring) (t token, remain tstring, err error) {
+func (c *compiler2) tokenizeNumber(s tstring) (t token, remain tstring, err error) {
 	var num tstring
 	num, remain = s.consumeWhile(decimal)
 	return token{tokNumber, num}, remain, nil
 }
 
-func (c *compiler2) parseMinus(s tstring) (t token, remain tstring, err error) {
+func (c *compiler2) tokenizeMinus(s tstring) (t token, remain tstring, err error) {
 	var num tstring
 	num, remain = s.consume(1).consumeWhile(decimal)
 	if len(num) == 0 {
@@ -569,14 +672,14 @@ func (c *compiler2) parseMinus(s tstring) (t token, remain tstring, err error) {
 	return token{tokNumber, num}, remain, nil
 }
 
-func (c *compiler2) parseDot(s tstring) (t token, remain tstring, err error) {
+func (c *compiler2) tokenizeDot(s tstring) (t token, remain tstring, err error) {
 	if len(s) > 1 && s[1] == '.' {
 		return token{tokChildren, ""}, s.consume(2), nil
 	}
-	return token{tokCurrent, ""}, s.consume(1), nil
+	return token{tokSelf, ""}, s.consume(1), nil
 }
 
-func (c *compiler2) parseQuote(s tstring) (t token, remain tstring, err error) {
+func (c *compiler2) tokenizeQuote(s tstring) (t token, remain tstring, err error) {
 	quot := rune(s[0])
 	s = s.consume(1)
 
@@ -618,45 +721,24 @@ loop:
 	return token{tokString, tstring(scopy)}, remain, nil
 }
 
-func (c *compiler2) tokenizePath(path string) error {
-	s := tstring(path).consumeWhitespace()
-	c.tokens = make(tokenList, 0)
-
-	for len(s) > 0 {
-		tok, remain, err := c.parseToken(s)
-		if err != nil {
-			return err
-		}
-		if tok.id == tokNil {
-			return errPath
-		}
-
-		c.tokens = append(c.tokens, tok)
-
-		s = remain.consumeWhitespace()
-	}
-
-	return nil
-}
-
 //
-// tokenList
+// tokens
 //
 
-type tokenList []token
+type tokens []token
 
-func (t tokenList) consume(n int) tokenList {
+func (t tokens) consume(n int) tokens {
 	return t[n:]
 }
 
-func (t tokenList) peek() token {
+func (t tokens) peekID() tokenID {
 	if len(t) == 0 {
-		return token{id: tokEOL}
+		return tokEOL
 	}
-	return t[0]
+	return t[0].id
 }
 
-func (t tokenList) next() (tok token, remain tokenList) {
+func (t tokens) next() (tok token, remain tokens) {
 	if len(t) == 0 {
 		return token{id: tokEOL}, t
 	}
@@ -715,7 +797,7 @@ func decimal(r rune) bool {
 
 func identifierStart(r rune) bool {
 	if r < 128 {
-		return (tbl0[r] & xIdentStart) != 0
+		return (lexHint0[r] & xIdentStart) != 0
 	}
 
 	switch {
@@ -750,7 +832,7 @@ func identifier(r rune) bool {
 	// "-" | "." | [0-9] | #xB7 | [#x0300-#x036F] | [#x203F-#x2040]
 	switch {
 	case r < 128:
-		return (tbl0[r] & xIdentChar) != 0
+		return (lexHint0[r] & xIdentChar) != 0
 	case identifierStart(r):
 		return true
 	case r == 0xb7:
