@@ -204,7 +204,7 @@ func TestAbsolutePath(t *testing.T) {
 	}
 }
 
-func TestPath2(t *testing.T) {
+func TestPath2a(t *testing.T) {
 	pathStr := `./ ((apple[ ((banana) | cat="dog") ] [-1])) | b /b`
 
 	var c compiler2
@@ -227,6 +227,54 @@ func TestPath2(t *testing.T) {
 	}
 
 	_ = p
+}
+
+func TestPath2(t *testing.T) {
+	doc := NewDocument()
+	err := doc.ReadFromString(testXML)
+	if err != nil {
+		t.Error(err)
+	}
+
+	for _, test := range tests {
+		path, err := CompilePath2(test.path)
+		if err != nil {
+			if r, ok := test.result.(errorResult); !ok || err.Error() != string(r) {
+				fail(t, test)
+			}
+			continue
+		}
+
+		// Test both FindElementsPath and FindElementPath
+		element := doc.FindElementPath2(path)
+		elements := doc.FindElementsPath2(path)
+
+		switch s := test.result.(type) {
+		case errorResult:
+			fail(t, test)
+		case nil:
+			if element != nil || len(elements) != 0 {
+				fail(t, test)
+			}
+		case string:
+			if element == nil || element.Text() != s ||
+				len(elements) != 1 || elements[0].Text() != s {
+				fail(t, test)
+			}
+		case []string:
+			if element == nil || element.Text() != s[0] || len(elements) != len(s) {
+				fail(t, test)
+				continue
+			}
+			for i := 0; i < len(elements); i++ {
+				if elements[i].Text() != s[i] {
+					fail(t, test)
+					break
+				}
+			}
+		}
+
+	}
 }
 
 var tokName = []string{

@@ -506,6 +506,19 @@ func (e *Element) FindElementPath(path Path) *Element {
 	}
 }
 
+// FindElementPath2 returns the first element matched by the XPath-like path
+// string. Returns nil if no element is found using the path.
+func (e *Element) FindElementPath2(path Path2) *Element {
+	p := &pather2{}
+	elements := p.traverse(e, path)
+	switch {
+	case len(elements) > 0:
+		return elements[0]
+	default:
+		return nil
+	}
+}
+
 // FindElements returns a slice of elements matched by the XPath-like path
 // string. Panics if an invalid path string is supplied.
 func (e *Element) FindElements(path string) []*Element {
@@ -515,6 +528,12 @@ func (e *Element) FindElements(path string) []*Element {
 // FindElementsPath returns a slice of elements matched by the Path object.
 func (e *Element) FindElementsPath(path Path) []*Element {
 	p := newPather()
+	return p.traverse(e, path)
+}
+
+// FindElementsPath2 returns a slice of elements matched by the Path object.
+func (e *Element) FindElementsPath2(path Path2) []*Element {
+	p := &pather2{}
 	return p.traverse(e, path)
 }
 

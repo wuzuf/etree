@@ -16,7 +16,8 @@ var errPathSyntax = errors.New("etree: path syntax error")
 
 // TODO:
 //  Parse escape codes in strings
-//  Write selector and filter apply functions
+//  Handle ':' in identifiers
+//  Optimize candidate list code
 
 /*
 A Path2 is an object that represents an optimized version of an XPath-like
@@ -153,17 +154,17 @@ type filter2 struct {
 }
 
 type selector2 interface {
-	//	apply(e *Element, p *pather)
+	eval(e *Element) candidates
 }
 
 type filterExpr2 interface {
-	//	apply(p *pather)
+	eval(e *Element, in candidates) candidates
 }
 
 var rootSegment = segment2{
 	exprs: []segmentExpr2{
 		segmentExpr2{
-			sel: selectRoot2{},
+			sel: &selectRoot2{},
 		},
 	},
 }
@@ -171,7 +172,7 @@ var rootSegment = segment2{
 var descendantsSegment = segment2{
 	exprs: []segmentExpr2{
 		segmentExpr2{
-			sel: selectDescendants2{},
+			sel: &selectDescendants2{},
 		},
 	},
 }
@@ -303,13 +304,14 @@ func (c *compiler2) parseSelector2(s *selector2, toks tokens) (remain tokens, er
 	tok, toks = toks.next()
 	switch tok.id {
 	case tokSelf:
-		*s = selectSelf2{}
+		*s = &selectSelf2{}
 	case tokParent:
-		*s = selectParent2{}
+		*s = &selectParent2{}
 	case tokChildren:
-		*s = selectChildren2{}
+		*s = &selectChildren2{}
 	case tokIdentifier:
-		*s = selectChildrenByTag2{tok.value}
+		sp, tag := spaceDecompose(tok.value.toString())
+		*s = &selectChildrenByTag2{sp, tag}
 	default:
 		return nil, errPathSyntax
 	}
@@ -366,14 +368,14 @@ func (c *compiler2) parseFilterExpr2(f *filter2, toks tokens) (remain tokens, er
 		if index > 0 {
 			index--
 		}
-		f.exprs = append(f.exprs, filterIndex2{index})
+		f.exprs = append(f.exprs, &filterIndex2{index})
 
 	case tokAt:
 		tok, toks = toks.next()
 		if tok.id != tokIdentifier {
 			return nil, errPathSyntax
 		}
-		name := tok.value
+		sp, key := spaceDecompose(tok.value.toString())
 
 		if toks.peekID() == tokEqual {
 			// '@' ident '=' string
@@ -381,14 +383,14 @@ func (c *compiler2) parseFilterExpr2(f *filter2, toks tokens) (remain tokens, er
 			if tok.id != tokString {
 				return nil, errPathSyntax
 			}
-			f.exprs = append(f.exprs, filterAttribByValue2{name, tok.value})
+			f.exprs = append(f.exprs, &filterAttribValue2{sp, key, tok.value.toString()})
 		} else {
 			// '@' ident
-			f.exprs = append(f.exprs, filterAttrib2{name})
+			f.exprs = append(f.exprs, &filterAttrib2{sp, key})
 		}
 
 	case tokIdentifier:
-		name := tok.value
+		sp, tag := spaceDecompose(tok.value.toString())
 
 		switch toks.peekID() {
 		case tokEqual:
@@ -397,29 +399,28 @@ func (c *compiler2) parseFilterExpr2(f *filter2, toks tokens) (remain tokens, er
 			if tok.id != tokString {
 				return nil, errPathSyntax
 			}
-			f.exprs = append(f.exprs, filterTagByValue2{name, tok.value})
+			f.exprs = append(f.exprs, &filterChildText2{sp, tag, tok.value.toString()})
 
 		case tokLParen:
 			tok, toks = toks.consume(1).next()
-			if tok.id != tokRParen || name != "text" {
+			if tok.id != tokRParen || tag != "text" {
 				return nil, errPathSyntax
 			}
-			tok, toks = toks.next()
-			if tok.id == tokEqual {
+			if toks.peekID() == tokEqual {
 				// ident '(' ')' '=' string
-				tok, toks = toks.next()
+				tok, toks = toks.consume(1).next()
 				if tok.id != tokString {
 					return nil, errPathSyntax
 				}
-				f.exprs = append(f.exprs, filterTextByValue2{tok.value})
+				f.exprs = append(f.exprs, &filterTextByValue2{tok.value.toString()})
 			} else {
 				// ident '(' ')'
-				f.exprs = append(f.exprs, filterText2{})
+				f.exprs = append(f.exprs, &filterText2{})
 			}
 
 		default:
 			// ident
-			f.exprs = append(f.exprs, filterTag2{name})
+			f.exprs = append(f.exprs, &filterChild2{sp, tag})
 		}
 
 	default:
@@ -429,16 +430,144 @@ func (c *compiler2) parseFilterExpr2(f *filter2, toks tokens) (remain tokens, er
 	return toks, nil
 }
 
+//
+// pather
+//
+
+// A pather is helper object that traverses an element tree using
+// a Path object.  It collects and deduplicates all elements matching
+// the path query.
+type pather2 struct {
+}
+
+// A node represents an element and the remaining path segments that
+// should be applied against it by the pather.
+type node2 struct {
+	e        *Element
+	segments []segment2
+}
+
+type candidates struct {
+	list  []*Element
+	table map[*Element]bool
+}
+
+func newCandidates() candidates {
+	return candidates{
+		list:  make([]*Element, 0),
+		table: make(map[*Element]bool),
+	}
+}
+
+func (c *candidates) merge(other candidates) {
+	for _, can := range other.list {
+		c.add(can)
+	}
+}
+
+func (c *candidates) add(e *Element) {
+	if !c.table[e] {
+		c.table[e] = true
+		c.list = append(c.list, e)
+	}
+}
+
+// traverse follows the path from the element e, collecting
+// and then returning all elements that match the path's selectors
+// and filters.
+func (p *pather2) traverse(e *Element, path Path2) []*Element {
+	out := newCandidates()
+
+	var queue fifo
+	for queue.add(node2{e, path.segments}); queue.len() > 0; {
+		n := queue.remove().(node2)
+		seg, remain := n.segments[0], n.segments[1:]
+
+		candidates := p.evalSegment(n.e, seg)
+
+		if len(remain) == 0 {
+			out.merge(candidates)
+		} else {
+			for _, e := range candidates.list {
+				queue.add(node2{e, remain})
+			}
+		}
+	}
+
+	return out.list
+}
+
+func (p *pather2) evalSegment(e *Element, s segment2) candidates {
+	out := newCandidates()
+
+	for _, ex := range s.exprs {
+		out.merge(p.evalSegmentExpr(e, ex))
+	}
+
+	return out
+}
+
+func (p *pather2) evalSegmentExpr(e *Element, expr segmentExpr2) candidates {
+	out := expr.sel.eval(e)
+
+	if len(out.list) > 0 {
+		for _, f := range expr.filters {
+			out = p.evalFilter(e, f, out)
+			if len(out.list) == 0 {
+				break
+			}
+		}
+	}
+
+	return out
+}
+
+func (p *pather2) evalFilter(e *Element, f filter2, in candidates) candidates {
+	out := newCandidates()
+
+	for _, expr := range f.exprs {
+		out.merge(expr.eval(e, in))
+	}
+
+	return out
+}
+
 // selectRoot selects the element's root node.
 type selectRoot2 struct {
+}
+
+func (s *selectRoot2) eval(e *Element) candidates {
+	root := e
+	for root.parent != nil {
+		root = root.parent
+	}
+	out := newCandidates()
+	out.add(root)
+	return out
 }
 
 // selectSelf selects the current element into the candidate list.
 type selectSelf2 struct {
 }
 
+func (s *selectSelf2) eval(e *Element) candidates {
+	out := newCandidates()
+	out.add(e)
+	return out
+}
+
 // selectParent selects the element's parent into the candidate list.
 type selectParent2 struct {
+}
+
+func (s *selectParent2) eval(e *Element) candidates {
+	out := newCandidates()
+
+	if e.parent != nil {
+		out.add(e.parent)
+	}
+
+	return out
 }
 
 // selectChildren selects the element's child elements into the candidate
@@ -446,15 +575,57 @@ type selectParent2 struct {
 type selectChildren2 struct {
 }
 
+func (s *selectChildren2) eval(e *Element) candidates {
+	out := newCandidates()
+
+	for _, child := range e.Child {
+		if child, ok := child.(*Element); ok {
+			out.add(child)
+		}
+	}
+
+	return out
+}
+
 // selectChildrenByTag selects into the candidate list all child elements of
 // the element having the specified tag.
 type selectChildrenByTag2 struct {
-	tag tstring
+	space string
+	tag   string
+}
+
+func (s *selectChildrenByTag2) eval(e *Element) candidates {
+	out := newCandidates()
+
+	for _, ch := range e.Child {
+		if ch, ok := ch.(*Element); ok && spaceMatch(s.space, ch.Space) && s.tag == ch.Tag {
+			out.add(ch)
+		}
+	}
+
+	return out
 }
 
 // selectDescendants selects all descendant child elements of the element into
 // the candidate list.
 type selectDescendants2 struct {
+}
+
+func (s *selectDescendants2) eval(e *Element) candidates {
+	out := newCandidates()
+
+	var queue fifo
+	for queue.add(e); queue.len() > 0; {
+		e := queue.remove().(*Element)
+		out.add(e)
+		for _, ch := range e.Child {
+			if ch, ok := ch.(*Element); ok {
+				queue.add(ch)
+			}
+		}
+	}
+
+	return out
 }
 
 // filterIndex filters the candidate list, keeping only the candidate at the
@@ -463,41 +634,147 @@ type filterIndex2 struct {
 	index int
 }
 
+func (f *filterIndex2) eval(e *Element, in candidates) candidates {
+	out := newCandidates()
+
+	if f.index >= 0 {
+		if f.index < len(in.list) {
+			out.add(in.list[f.index])
+		}
+	} else {
+		if -f.index <= len(in.list) {
+			out.add(in.list[len(in.list)+f.index])
+		}
+	}
+
+	return out
+}
+
 // filterAttrib filters the candidate list for elements having the specified
 // attribute.
 type filterAttrib2 struct {
-	attr tstring
+	space string
+	key   string
 }
 
-// filterAttribByValue filters the candidate list for elements having the
+func (f *filterAttrib2) eval(e *Element, in candidates) candidates {
+	out := newCandidates()
+
+	for _, ch := range in.list {
+		for _, a := range ch.Attr {
+			if spaceMatch(f.space, a.Space) && f.key == a.Key {
+				out.add(ch)
+				break
+			}
+		}
+	}
+
+	return out
+}
+
+// filterAttribValue filters the candidate list for elements having the
 // specified attribute with the specified value.
-type filterAttribByValue2 struct {
-	attr  tstring
-	value tstring
+type filterAttribValue2 struct {
+	space string
+	key   string
+	value string
 }
 
-// filterTag filters the candidate list for elements having a child element
+func (f *filterAttribValue2) eval(e *Element, in candidates) candidates {
+	out := newCandidates()
+
+	for _, ch := range in.list {
+		for _, a := range ch.Attr {
+			if spaceMatch(f.space, a.Space) && f.key == a.Key && f.value == a.Value {
+				out.add(ch)
+				break
+			}
+		}
+	}
+
+	return out
+}
+
+// filterChild filters the candidate list for elements having a child element
 // with the specified tag.
-type filterTag2 struct {
-	tag tstring
+type filterChild2 struct {
+	space string
+	tag   string
 }
 
-// filterTagByValue filters the candidate list for elements having a child
+func (f *filterChild2) eval(e *Element, in candidates) candidates {
+	out := newCandidates()
+
+	for _, ch := range in.list {
+		for _, cc := range ch.Child {
+			if cc, ok := cc.(*Element); ok && spaceMatch(f.space, cc.Space) && f.tag == cc.Tag {
+				out.add(ch)
+			}
+		}
+	}
+
+	return out
+}
+
+// filterChildText filters the candidate list for elements having a child
 // element with the specified tag and text.
-type filterTagByValue2 struct {
-	tag   tstring
-	value tstring
+type filterChildText2 struct {
+	space string
+	tag   string
+	value string
+}
+
+func (f *filterChildText2) eval(e *Element, in candidates) candidates {
+	out := newCandidates()
+
+	for _, ch := range in.list {
+		for _, cc := range ch.Child {
+			if cc, ok := cc.(*Element); ok && spaceMatch(f.space, cc.Space) && f.tag == cc.Tag && f.value == cc.Text() {
+				out.add(ch)
+			}
+		}
+	}
+
+	return out
 }
 
 // filterText filters the candidate list for elements having text.
 type filterText2 struct {
 }
 
+func (s *filterText2) eval(e *Element, in candidates) candidates {
+	out := newCandidates()
+
+	for _, ch := range in.list {
+		if ch.Text() != "" {
+			out.add(ch)
+		}
+	}
+
+	return out
+}
+
 // filterTextByValue filters the candidate list for elements having
 // text equal to the specified value.
 type filterTextByValue2 struct {
-	value tstring
+	value string
 }
+
+func (f *filterTextByValue2) eval(e *Element, in candidates) candidates {
+	out := newCandidates()
+
+	for _, ch := range in.list {
+		if ch.Text() == f.value {
+			out.add(ch)
+		}
+	}
+
+	return out
+}
+
+//
+// tokenizer
+//
 
 type tokenID uint8
 
@@ -674,7 +951,7 @@ func (c *compiler2) tokenizeMinus(s tstring) (t token, remain tstring, err error
 
 func (c *compiler2) tokenizeDot(s tstring) (t token, remain tstring, err error) {
 	if len(s) > 1 && s[1] == '.' {
-		return token{tokChildren, ""}, s.consume(2), nil
+		return token{tokParent, ""}, s.consume(2), nil
 	}
 	return token{tokSelf, ""}, s.consume(1), nil
 }
@@ -777,14 +1054,17 @@ func (s tstring) consumeWhile(fn func(r rune) bool) (consumed, remain tstring) {
 }
 
 func (s tstring) nextRune() (r rune, sz int) {
+	return utf8.DecodeRuneInString(s.toString())
+}
+
+func (s tstring) toString() string {
 	// Convert the tstring to a string without making a copy.
-	var dstString string
+	var out string
 	src := (*reflect.StringHeader)(unsafe.Pointer(&s))
-	dst := (*reflect.StringHeader)(unsafe.Pointer(&dstString))
+	dst := (*reflect.StringHeader)(unsafe.Pointer(&out))
 	dst.Len = src.Len
 	dst.Data = src.Data
-
-	return utf8.DecodeRuneInString(dstString)
+	return out
 }
 
 func whitespace(r rune) bool {
