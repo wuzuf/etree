@@ -204,8 +204,8 @@ func TestAbsolutePath(t *testing.T) {
 	}
 }
 
-func TestPath2a(t *testing.T) {
-	pathStr := `./ ((apple[ ((banana) | cat="dog") ] [-1])) | b /b`
+func TestTokenizer(t *testing.T) {
+	pathStr := `./ ((apple[ ((banana) | cat="dog") ] [-1])) | b /p:price`
 
 	var c compiler2
 	toks, err := c.tokenizePath(pathStr)
@@ -239,7 +239,7 @@ func TestPath2(t *testing.T) {
 	for _, test := range tests {
 		path, err := CompilePath2(test.path)
 		if err != nil {
-			if r, ok := test.result.(errorResult); !ok || err.Error() != string(r) {
+			if _, ok := test.result.(errorResult); !ok {
 				fail(t, test)
 			}
 			continue
@@ -287,6 +287,7 @@ var tokName = []string{
 	"')'",
 	"'|'",
 	"'='",
+	"':'",
 	"'@'",
 	"'.'",
 	"'..'",

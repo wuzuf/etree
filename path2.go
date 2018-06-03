@@ -12,11 +12,10 @@ import (
 	"unsafe"
 )
 
-var errPathSyntax = errors.New("etree: path syntax error")
+var ErrPathSyntax = errors.New("etree: invalid path")
 
 // TODO:
 //  Parse escape codes in strings
-//  Handle ':' in identifiers
 //  Optimize candidate list code
 
 /*
@@ -104,8 +103,6 @@ func MustCompilePath2(path string) Path2 {
 	return p
 }
 
-var errPath = errors.New("invalid path")
-
 /*
 Tokens:
   /                     sep
@@ -116,6 +113,7 @@ Tokens:
   )                     rparen
   |                     union
   =                     equal
+  :                     colon
   @                     attrib
   .                     self
   ..                    parent
@@ -130,14 +128,15 @@ Grammar:
   <sep>           ::= '/' | '//'
   <segment>       ::= <segmentExpr> ('|' <segmentExpr>)
   <segmentExpr>   ::= <selector> <filterWrapper>* | '(' <segment> ')'
-  <selector>      ::= '.' | '..' | '*' | identifier
+  <selector>      ::= '.' | '..' | '*' | <name>
   <filterWrapper> ::= '[' <filter> ']'
   <filter>        ::= <filterExpr> ('|' <filterExpr>)*
   <filterExpr>    ::= <filterIndex> | <filterAttrib> | <filterChild> | <filterFunc> | '(' <filter> ')'
   <filterIndex>   ::= number
-  <filterAttrib>  ::= '@' ident | '@' ident '=' string
-  <filterChild>   ::= ident | ident '=' string
-  <filterFunc>    ::= ident '(' ')' | ident '(' ')' '=' string
+  <filterAttrib>  ::= '@' <name> | '@' <name> '=' string
+  <filterChild>   ::= <name> | <name> '=' string
+  <filterFunc>    ::= <name> '(' ')' | <name> '(' ')' '=' string
+  <name> 		  ::= ident | ident ':' ident
 */
 
 type segment2 struct {
@@ -194,7 +193,7 @@ func (c *compiler2) parsePath(p *Path2, toks tokens) (err error) {
 		p.segments = append(p.segments, descendantsSegment)
 		toks = toks.consume(1)
 	case tokEOL:
-		return errPathSyntax
+		return ErrPathSyntax
 	}
 
 	// Process remaining segments.
@@ -218,7 +217,7 @@ loop:
 		case tokEOL:
 			break loop
 		default:
-			return errPathSyntax
+			return ErrPathSyntax
 		}
 	}
 
@@ -260,7 +259,7 @@ func (c *compiler2) parseSegmentExpr2(s *segment2, toks tokens) (remain tokens, 
 		var tok token
 		tok, toks = toks.next()
 		if tok.id != tokRParen {
-			return nil, errPathSyntax
+			return nil, ErrPathSyntax
 		}
 		return toks, nil
 	}
@@ -281,13 +280,13 @@ func (c *compiler2) parseSegmentExpr2(s *segment2, toks tokens) (remain tokens, 
 		var f filter2
 		toks, err = c.parseFilter2(&f, toks.consume(1))
 		if err != nil {
-			return nil, errPathSyntax
+			return nil, ErrPathSyntax
 		}
 
 		var tok token
 		tok, toks = toks.next()
 		if tok.id != tokRBracket {
-			return nil, errPathSyntax
+			return nil, ErrPathSyntax
 		}
 
 		e.filters = append(e.filters, f)
@@ -298,25 +297,46 @@ func (c *compiler2) parseSegmentExpr2(s *segment2, toks tokens) (remain tokens, 
 }
 
 func (c *compiler2) parseSelector2(s *selector2, toks tokens) (remain tokens, err error) {
-	// <selector> ::= '.' | '..' | '*' | identifier
+	// <selector> ::= '.' | '..' | '*' | <name>
 
-	var tok token
-	tok, toks = toks.next()
-	switch tok.id {
+	switch toks.peekID() {
 	case tokSelf:
+		toks = toks.consume(1)
 		*s = &selectSelf2{}
 	case tokParent:
+		toks = toks.consume(1)
 		*s = &selectParent2{}
 	case tokChildren:
+		toks = toks.consume(1)
 		*s = &selectChildren2{}
 	case tokIdentifier:
-		sp, tag := spaceDecompose(tok.value.toString())
-		*s = &selectChildrenByTag2{sp, tag}
+		var sp, name string
+		toks, sp, name, err = c.parseName(toks)
+		if err != nil {
+			return nil, err
+		}
+		*s = &selectChildrenByTag2{sp, name}
 	default:
-		return nil, errPathSyntax
+		return nil, ErrPathSyntax
 	}
 
 	return toks, nil
+}
+
+func (c *compiler2) parseName(toks tokens) (remain tokens, sp, name string, err error) {
+	// <name> ::= identifier | identifier ':' identifier
+
+	var tok token
+	tok, toks = toks.next()
+	if toks.peekID() == tokColon {
+		sp = tok.value.toString()
+		tok, toks = toks.consume(1).next()
+		if tok.id != tokIdentifier {
+			return nil, "", "", ErrPathSyntax
+		}
+		return toks, sp, tok.value.toString(), nil
+	}
+	return toks, "", tok.value.toString(), nil
 }
 
 func (c *compiler2) parseFilter2(fu *filter2, toks tokens) (remain tokens, err error) {
@@ -345,25 +365,26 @@ func (c *compiler2) parseFilterExpr2(f *filter2, toks tokens) (remain tokens, er
 	//                | ident '(' ')' | ident '(' ')' '=' string
 	//                | '(' <filter> ')'
 
-	var tok token
-	tok, toks = toks.next()
-
-	switch tok.id {
+	switch toks.peekID() {
 	case tokLParen:
 		// '(' <filter> ')'
 		var ff filter2
-		toks, err = c.parseFilter2(&ff, toks)
+		toks, err = c.parseFilter2(&ff, toks.consume(1))
 		if err != nil {
 			return nil, err
 		}
+		var tok token
 		tok, toks = toks.next()
 		if tok.id != tokRParen {
-			return nil, errPathSyntax
+			return nil, ErrPathSyntax
 		}
 		f.exprs = append(f.exprs, ff.exprs...)
 
 	case tokNumber:
 		// number
+		var tok token
+		tok, toks = toks.next()
+
 		index, _ := strconv.Atoi(string(tok.value))
 		if index > 0 {
 			index--
@@ -371,46 +392,53 @@ func (c *compiler2) parseFilterExpr2(f *filter2, toks tokens) (remain tokens, er
 		f.exprs = append(f.exprs, &filterIndex2{index})
 
 	case tokAt:
-		tok, toks = toks.next()
-		if tok.id != tokIdentifier {
-			return nil, errPathSyntax
+		var sp, key string
+		toks, sp, key, err = c.parseName(toks.consume(1))
+		if err != nil {
+			return nil, err
 		}
-		sp, key := spaceDecompose(tok.value.toString())
 
 		if toks.peekID() == tokEqual {
-			// '@' ident '=' string
+			// '@' <name> '=' string
+			var tok token
 			tok, toks = toks.consume(1).next()
 			if tok.id != tokString {
-				return nil, errPathSyntax
+				return nil, ErrPathSyntax
 			}
 			f.exprs = append(f.exprs, &filterAttribValue2{sp, key, tok.value.toString()})
 		} else {
-			// '@' ident
+			// '@' <name>
 			f.exprs = append(f.exprs, &filterAttrib2{sp, key})
 		}
 
 	case tokIdentifier:
-		sp, tag := spaceDecompose(tok.value.toString())
+		var sp, tag string
+		toks, sp, tag, err = c.parseName(toks)
+		if err != nil {
+			return nil, err
+		}
 
 		switch toks.peekID() {
 		case tokEqual:
 			// ident '=' string
+			var tok token
 			tok, toks = toks.consume(1).next()
 			if tok.id != tokString {
-				return nil, errPathSyntax
+				return nil, ErrPathSyntax
 			}
 			f.exprs = append(f.exprs, &filterChildText2{sp, tag, tok.value.toString()})
 
 		case tokLParen:
+			var tok token
 			tok, toks = toks.consume(1).next()
 			if tok.id != tokRParen || tag != "text" {
-				return nil, errPathSyntax
+				return nil, ErrPathSyntax
 			}
 			if toks.peekID() == tokEqual {
 				// ident '(' ')' '=' string
 				tok, toks = toks.consume(1).next()
 				if tok.id != tokString {
-					return nil, errPathSyntax
+					return nil, ErrPathSyntax
 				}
 				f.exprs = append(f.exprs, &filterTextByValue2{tok.value.toString()})
 			} else {
@@ -424,7 +452,7 @@ func (c *compiler2) parseFilterExpr2(f *filter2, toks tokens) (remain tokens, er
 		}
 
 	default:
-		return nil, errPathSyntax
+		return nil, ErrPathSyntax
 	}
 
 	return toks, nil
@@ -788,6 +816,7 @@ const (
 	tokRParen
 	tokUnion
 	tokEqual
+	tokColon
 	tokAt
 	tokSelf
 	tokParent
@@ -814,6 +843,7 @@ const (
 	lQuo       // quote
 	lAtt       // attrib (@)
 	lEqu       // equal
+	lCol       // colon
 )
 
 const (
@@ -838,7 +868,7 @@ var lexHint0 = [128]uint8{
 	x0 | lNil, x0 | lNil, x0 | lQuo, x0 | lNil, x0 | lNil, x0 | lNil, x0 | lNil, x0 | lQuo, // 32..39
 	x0 | lLpa, x0 | lRpa, x0 | lWld, x0 | lNil, x0 | lNil, x1 | lSub, x1 | lDot, x0 | lSep, // 40..47
 	x1 | lNum, x1 | lNum, x1 | lNum, x1 | lNum, x1 | lNum, x1 | lNum, x1 | lNum, x1 | lNum, // 48..55
-	x1 | lNum, x1 | lNum, x0 | lNil, x0 | lNil, x0 | lNil, x0 | lEqu, x0 | lNil, x0 | lNil, // 56..63
+	x1 | lNum, x1 | lNum, x0 | lCol, x0 | lNil, x0 | lNil, x0 | lEqu, x0 | lNil, x0 | lNil, // 56..63
 	x0 | lAtt, x0 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, // 64..71
 	x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, // 72..79
 	x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, x2 | lIde, // 80..87
@@ -870,6 +900,7 @@ var lexToToken = []lexemeData{
 	/*lQuo*/ {tokenize: (*compiler2).tokenizeQuote},
 	/*lAtt*/ {tokID: tokAt},
 	/*lEqu*/ {tokID: tokEqual},
+	/*lCol*/ {tokID: tokColon},
 }
 
 func (c *compiler2) tokenizePath(path string) (toks tokens, err error) {
@@ -882,7 +913,7 @@ func (c *compiler2) tokenizePath(path string) (toks tokens, err error) {
 			return nil, err
 		}
 		if tok.id == tokNil {
-			return nil, errPath
+			return nil, ErrPathSyntax
 		}
 
 		toks = append(toks, tok)
@@ -908,7 +939,7 @@ func (c *compiler2) tokenizeLexeme(s tstring) (t token, remain tstring, err erro
 	case identifierStart(r):
 		ldata = lexToToken[lIde]
 	default:
-		return token{}, s, errPath
+		return token{}, s, ErrPathSyntax
 	}
 
 	// If the lexeme consists of only one character, we're done.
@@ -943,7 +974,7 @@ func (c *compiler2) tokenizeMinus(s tstring) (t token, remain tstring, err error
 	var num tstring
 	num, remain = s.consume(1).consumeWhile(decimal)
 	if len(num) == 0 {
-		return token{}, s, errPath
+		return token{}, s, ErrPathSyntax
 	}
 	num = s[:len(num)+1]
 	return token{tokNumber, num}, remain, nil
