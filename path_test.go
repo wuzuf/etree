@@ -124,6 +124,22 @@ var tests = []test{
 	{"/bookstore/book[-4]/title", "Everyday Italian"},
 	{"/bookstore/book[-5]/title", nil},
 
+	// extra-whitespace queries
+	{" / bookstore  / book [ 1 ] / title  ", "Everyday Italian"},
+	{" / bookstore / book[ -5 ] / title ", nil},
+
+	// quotes
+	{".//book[@category='COOKING']/title[@lang='en']", "Everyday Italian"},
+	{`.//book[@category="COOKING"]/title[@lang="en"]`, "Everyday Italian"},
+
+	// union queries
+	{"./bookstore/book[1]|book[4]/title", []string{"Everyday Italian", "Learning XML"}},
+	{"./bookstore/(book[1]|book[4])/title", []string{"Everyday Italian", "Learning XML"}},
+	{"./bookstore/book[author='Kurt Cagle'|author='James Linn']/title", "XQuery Kick Start"},
+	{"./bookstore/book[(author='Kurt Cagle')|(author='James Linn')]/title", "XQuery Kick Start"},
+	{"./bookstore/book[((author='Kurt Cagle')|(author='James Linn'))]/title", "XQuery Kick Start"},
+	{"./bookstore/book[((author='Kurt Cagle')|author='James Linn')]/title", "XQuery Kick Start"},
+
 	// bad paths
 	{"./bookstore/book[]", errorResult("etree: path contains an empty filter expression.")},
 	{"./bookstore/book[@category='WEB'", errorResult("etree: path has invalid filter [brackets].")},
