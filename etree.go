@@ -1,4 +1,4 @@
-// Copyright 2015 Brett Vickers.
+// Copyright 2015-2018 Brett Vickers.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -490,26 +490,13 @@ func (e *Element) SelectElements(tag string) []*Element {
 // string. Returns nil if no element is found using the path. Panics if an
 // invalid path string is supplied.
 func (e *Element) FindElement(path string) *Element {
-	return e.FindElementPath(MustCompilePath(path))
-}
-
-// FindElementPath returns the first element matched by the XPath-like path
-// string. Returns nil if no element is found using the path.
-func (e *Element) FindElementPath(path Path) *Element {
-	p := newPather()
-	elements := p.traverse(e, path)
-	switch {
-	case len(elements) > 0:
-		return elements[0]
-	default:
-		return nil
-	}
+	return e.FindElementPath2(MustCompilePath(path))
 }
 
 // FindElementPath2 returns the first element matched by the XPath-like path
 // string. Returns nil if no element is found using the path.
-func (e *Element) FindElementPath2(path Path2) *Element {
-	p := &pather2{}
+func (e *Element) FindElementPath2(path Path) *Element {
+	p := &pather{}
 	elements := p.traverse(e, path)
 	switch {
 	case len(elements) > 0:
@@ -522,18 +509,12 @@ func (e *Element) FindElementPath2(path Path2) *Element {
 // FindElements returns a slice of elements matched by the XPath-like path
 // string. Panics if an invalid path string is supplied.
 func (e *Element) FindElements(path string) []*Element {
-	return e.FindElementsPath(MustCompilePath(path))
-}
-
-// FindElementsPath returns a slice of elements matched by the Path object.
-func (e *Element) FindElementsPath(path Path) []*Element {
-	p := newPather()
-	return p.traverse(e, path)
+	return e.FindElementsPath2(MustCompilePath(path))
 }
 
 // FindElementsPath2 returns a slice of elements matched by the Path object.
-func (e *Element) FindElementsPath2(path Path2) []*Element {
-	p := &pather2{}
+func (e *Element) FindElementsPath2(path Path) []*Element {
+	p := &pather{}
 	return p.traverse(e, path)
 }
 

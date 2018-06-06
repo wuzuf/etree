@@ -1,4 +1,4 @@
-// Copyright 2015 Brett Vickers.
+// Copyright 2015-2018 Brett Vickers.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -157,15 +157,15 @@ func TestPath(t *testing.T) {
 	for _, test := range tests {
 		path, err := CompilePath(test.path)
 		if err != nil {
-			if r, ok := test.result.(errorResult); !ok || err.Error() != string(r) {
+			if _, ok := test.result.(errorResult); !ok {
 				fail(t, test)
 			}
 			continue
 		}
 
 		// Test both FindElementsPath and FindElementPath
-		element := doc.FindElementPath(path)
-		elements := doc.FindElementsPath(path)
+		element := doc.FindElementPath2(path)
+		elements := doc.FindElementsPath2(path)
 
 		switch s := test.result.(type) {
 		case errorResult:
@@ -223,7 +223,7 @@ func TestAbsolutePath(t *testing.T) {
 func TestTokenizer(t *testing.T) {
 	pathStr := `./ ((apple[ ((banana) | cat="dog") ] [-1])) | b /p:price`
 
-	var c compiler2
+	var c compiler
 	toks, err := c.tokenizePath(pathStr)
 	if err != nil {
 		t.Errorf("ERR: %v\n", err)
@@ -237,60 +237,12 @@ func TestTokenizer(t *testing.T) {
 		}
 	}
 
-	p, err := CompilePath2(pathStr)
+	p, err := CompilePath(pathStr)
 	if err != nil {
 		t.Errorf("ERR: %v\n", err)
 	}
 
 	_ = p
-}
-
-func TestPath2(t *testing.T) {
-	doc := NewDocument()
-	err := doc.ReadFromString(testXML)
-	if err != nil {
-		t.Error(err)
-	}
-
-	for _, test := range tests {
-		path, err := CompilePath2(test.path)
-		if err != nil {
-			if _, ok := test.result.(errorResult); !ok {
-				fail(t, test)
-			}
-			continue
-		}
-
-		// Test both FindElementsPath and FindElementPath
-		element := doc.FindElementPath2(path)
-		elements := doc.FindElementsPath2(path)
-
-		switch s := test.result.(type) {
-		case errorResult:
-			fail(t, test)
-		case nil:
-			if element != nil || len(elements) != 0 {
-				fail(t, test)
-			}
-		case string:
-			if element == nil || element.Text() != s ||
-				len(elements) != 1 || elements[0].Text() != s {
-				fail(t, test)
-			}
-		case []string:
-			if element == nil || element.Text() != s[0] || len(elements) != len(s) {
-				fail(t, test)
-				continue
-			}
-			for i := 0; i < len(elements); i++ {
-				if elements[i].Text() != s[i] {
-					fail(t, test)
-					break
-				}
-			}
-		}
-
-	}
 }
 
 var tokName = []string{
