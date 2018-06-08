@@ -25,7 +25,6 @@ var testXML = `
 		<author>J K. Rowling</author>
 		<year>2005</year>
 		<p:price>29.99</p:price>
-		<editor></editor>
 		<editor/>
 	</book>
 
@@ -101,12 +100,14 @@ var tests = []test{
 	{"//book/price[text()='29.99']", "29.99"},
 	{"//book/author[text()='Kurt Cagle']", "Kurt Cagle"},
 	{"//book/editor[text()]", []string{"Clarkson Potter", "\n\t\t"}},
+	{"//book[editor]/editor", []string{"Clarkson Potter", "", "\n\t\t"}},
 
 	// attribute queries
 	{"./bookstore/book[@category='WEB']/title", []string{"XQuery Kick Start", "Learning XML"}},
 	{"./bookstore/book[@path='/books/xml']/title", []string{"Learning XML"}},
 	{"./bookstore/book[@category='COOKING']/title[@lang='en']", "Everyday Italian"},
 	{"./bookstore/book/title[@lang='en'][@sku='150']", "Harry Potter"},
+	{"./bookstore/book/title[@lang]", []string{"Everyday Italian", "Harry Potter", "XQuery Kick Start", "Learning XML"}},
 	{"./bookstore/book/title[@lang='fr']", nil},
 
 	// parent queries
@@ -133,7 +134,9 @@ var tests = []test{
 	{`.//book[@category="COOKING"]/title[@lang="en"]`, "Everyday Italian"},
 
 	// union queries
-	{"./bookstore/book[1]|book[4]/title", []string{"Everyday Italian", "Learning XML"}},
+	{"./bookstore/(book[1] | book[1] | book[1])/title", []string{"Everyday Italian"}},
+	{"./bookstore/book[1]/title|author", []string{"Everyday Italian", "Giada De Laurentiis"}},
+	{"./bookstore/book[1] | book[4]/title", []string{"Everyday Italian", "Learning XML"}},
 	{"./bookstore/(book[1]|book[4])/title", []string{"Everyday Italian", "Learning XML"}},
 	{"./bookstore/book[author='Kurt Cagle'|author='James Linn']/title", "XQuery Kick Start"},
 	{"./bookstore/book[(author='Kurt Cagle')|(author='James Linn')]/title", "XQuery Kick Start"},
